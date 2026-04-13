@@ -2,6 +2,7 @@
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera } from "@react-three/drei"; // Drei simplifies OrbitControls
 import Model from "./Model";
+import Controls from "./Controls";
 
 
 
@@ -11,6 +12,29 @@ const Hero = () => {
     const aspect = window.innerWidth / window.innerHeight
   return (
      <div className="h-screen bg-black w-full fixed top-0 left-0 overflow-hidden">
+
+          {/* Work In Progress Badge */}
+          <div
+            className="fixed top-5 right-5 z-50 flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold uppercase tracking-widest"
+            style={{
+              background: "rgba(0,0,0,0.75)",
+              backdropFilter: "blur(12px)",
+              border: "1px solid rgba(255,200,0,0.3)",
+              color: "rgba(255,200,0,0.85)",
+              boxShadow: "0 0 16px rgba(255,180,0,0.1)",
+              fontFamily: "'Segoe UI', system-ui, sans-serif",
+            }}
+          >
+            <span
+              className="w-2 h-2 rounded-full animate-pulse"
+              style={{ background: "rgba(255,200,0,0.85)" }}
+            />
+            Still Under Progress
+          </div>
+
+          {/* Controls Overlay */}
+          <Controls />
+
           <Canvas shadows >
           <ambientLight intensity={0.5} />  {/*to lighten the shadow */}
           <directionalLight

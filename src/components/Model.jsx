@@ -2,25 +2,29 @@
 import { useGSAP } from '@gsap/react';
 import { useGLTF } from '@react-three/drei'
 import gsap from 'gsap';
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 import * as THREE from 'three';
 import { Octree } from 'three/examples/jsm/math/Octree.js';
 import { Capsule } from 'three/examples/jsm/math/Capsule.js';
 
 export default function Model(props) {
-  const { nodes, materials, scene } = useGLTF('/models/3jsWorld.glb');
-  const characterRef = useRef(); // Use a ref for the character
-  // Use ref for isMoving to avoid stale closures in event listeners
+  const { nodes, materials } = useGLTF('/models/3jsWorld.glb');
+  const characterRef = useRef();
   const isMoving = useRef(false);
   const initialY = useRef(null);
 
-  //physics
-  const GRAVITY = 30;
+  // Jump state
+  const jumpCount = useRef(0);      // 0 = grounded, 1 = first jump used, 2 = double jump used
+  const isJumping = useRef(false);
+  const jumpTimeline = useRef(null);
+
+  // Physics / movement constants
   const CAPSULE_RADIUS = 0.35;
   const CAPSULE_HEIGHT = 1;
-  const JUMP_HEIGHT = 15;
-  const MOVE_SPEED = 1;
-
+  const BOUNCE_HEIGHT = 5;          // Cosmetic hop height during tile movement
+  const JUMP_HEIGHT = 22;           // First jump peak height
+  const DOUBLE_JUMP_HEIGHT = 16;    // Second jump peak height
+  const MAX_STEP_HEIGHT = 12;       // Max height difference the character can step up onto
 
   const colliderOctree = useRef(new Octree()).current;
   const playerCollider = useRef(new Capsule(
@@ -28,9 +32,6 @@ export default function Model(props) {
     new THREE.Vector3(0, CAPSULE_HEIGHT, 0),
     CAPSULE_RADIUS
   )).current;
-
-  let playerVelocity = new THREE.Vector3();
-  let playerOnFloor = false;
 
   const environmentRef = useRef();
 
@@ -42,74 +43,166 @@ export default function Model(props) {
 
 
   useGSAP(() => {
+    // Store the character's initial Y once on first run
     if (characterRef.current && initialY.current === null) {
       initialY.current = characterRef.current.position.y;
     }
 
+    // Raycast straight down from high altitude to find the floor surface Y at (x, z).
+    // Returns the hit Y coordinate, or null if nothing was hit.
+    function getRayFloorY(x, z) {
+      const ray = new THREE.Ray(
+        new THREE.Vector3(x, 1000, z),
+        new THREE.Vector3(0, -1, 0)
+      );
+      const hit = colliderOctree.rayIntersect(ray);
+      return hit ? hit.position.y : null;
+    }
+
+    // ── JUMP ────────────────────────────────────────────────────────────────────
+    function doJump() {
+      if (jumpCount.current >= 2 || !characterRef.current) return;
+
+      // Kill any in-flight jump so double-jump starts from current height
+      if (jumpTimeline.current) {
+        jumpTimeline.current.kill();
+        jumpTimeline.current = null;
+      }
+
+      jumpCount.current++;
+      isJumping.current = true;
+
+      const currentY = characterRef.current.position.y;
+      const jumpH = jumpCount.current === 1 ? JUMP_HEIGHT : DOUBLE_JUMP_HEIGHT;
+      const landingY = initialY.current !== null ? initialY.current : -4.0;
+
+      jumpTimeline.current = gsap.timeline({
+        onComplete: () => {
+          isJumping.current = false;
+          jumpCount.current = 0;
+          jumpTimeline.current = null;
+        }
+      });
+
+      // Rise to peak
+      jumpTimeline.current.to(characterRef.current.position, {
+        y: currentY + jumpH,
+        duration: 0.45,
+        ease: 'power2.out',
+      });
+
+      // Fall back to floor
+      jumpTimeline.current.to(characterRef.current.position, {
+        y: landingY,
+        duration: 0.4,
+        ease: 'power2.in',
+      });
+    }
+
+    // ── MOVEMENT ─────────────────────────────────────────────────────────────────
     function moveCharacter(newPos, targetRotation) {
       if (!characterRef.current) return;
 
-      // Update collider position to check collision
       const scale = 5.596;
-      const tempCollider = playerCollider.clone();
+      const currentFloorY = initialY.current !== null ? initialY.current : -4.0;
+      const currentPos = characterRef.current.position;
 
-      tempCollider.start.set(newPos.x, newPos.y + CAPSULE_RADIUS * scale, newPos.z);
-      tempCollider.end.set(newPos.x, newPos.y + CAPSULE_HEIGHT * scale - CAPSULE_RADIUS * scale, newPos.z);
+      // ── Floor height detection ───────────────────────────────────────────────
+      // Raycast at both current and destination positions.
+      // The *difference* between hits gives us the true floor height change,
+      // regardless of any world-space offset between the character origin and the surface.
+      const srcRayY = getRayFloorY(currentPos.x, currentPos.z);
+      const dstRayY = getRayFloorY(newPos.x, newPos.z);
+
+      let destFloorY = currentFloorY;
+      if (srcRayY !== null && dstRayY !== null) {
+        destFloorY = currentFloorY + (dstRayY - srcRayY);
+      }
+
+      // Block movement if the platform is too high to step onto
+      if (destFloorY - currentFloorY > MAX_STEP_HEIGHT) {
+        isMoving.current = false;
+        return;
+      }
+
+      // ── Capsule collision at destination ─────────────────────────────────────
+      const tempCollider = playerCollider.clone();
+      tempCollider.start.set(newPos.x, destFloorY + CAPSULE_RADIUS * scale, newPos.z);
+      tempCollider.end.set(newPos.x, destFloorY + CAPSULE_HEIGHT * scale - CAPSULE_RADIUS * scale, newPos.z);
       tempCollider.radius = CAPSULE_RADIUS * scale;
 
       const result = colliderOctree.capsuleIntersect(tempCollider);
-
-      if (result) {
-        // If interaction with wall (not floor), block.
-        // Floor normal relies on Y up.
-        if (result.normal.y < 0.5) {
-          // Wall
-          isMoving.current = false;
-          return;
-        }
+      if (result && result.normal.y < 0.5) {
+        // Wall collision — block movement
+        isMoving.current = false;
+        return;
       }
 
+      // ── Commit the move ───────────────────────────────────────────────────────
       isMoving.current = true;
+      initialY.current = destFloorY;
 
-      // Reset Y position
-      if (initialY.current !== null) {
-        characterRef.current.position.y = initialY.current;
+      // Moving resets jump state so the player can jump again after landing
+      if (jumpTimeline.current) {
+        jumpTimeline.current.kill();
+        jumpTimeline.current = null;
+        isJumping.current = false;
+        jumpCount.current = 0;
       }
 
       gsap.killTweensOf(characterRef.current.position);
       gsap.killTweensOf(characterRef.current.rotation);
 
+      // Arc peak sits above whichever surface is higher
+      const peakY = Math.max(currentFloorY, destFloorY) + BOUNCE_HEIGHT;
+
       const t1 = gsap.timeline({
-        onComplete: () => {
-          isMoving.current = false;
-        }
+        onComplete: () => { isMoving.current = false; }
       });
 
+      // XZ slide
       t1.to(characterRef.current.position, {
         x: newPos.x,
         z: newPos.z,
         duration: 0.5,
         ease: 'power2.out',
-      });
+      }, 0);
 
+      // Rotation
       t1.to(characterRef.current.rotation, {
         y: targetRotation,
         duration: 0.5,
         ease: 'power2.out',
       }, 0);
 
+      // Rise to arc peak
       t1.to(characterRef.current.position, {
-        y: (initialY.current || -4.0) + 5,
+        y: peakY,
         duration: 0.25,
-        yoyo: true,
-        repeat: 1,
+        ease: 'power2.out',
       }, 0);
+
+      // Land on destination floor
+      t1.to(characterRef.current.position, {
+        y: destFloorY,
+        duration: 0.25,
+        ease: 'power2.in',
+      }, 0.25);
     }
 
+    // ── INPUT ─────────────────────────────────────────────────────────────────
     const onKeyDown = (event) => {
-      // Check ref current value
-      if (isMoving.current) return;
       if (!characterRef.current) return;
+
+      // Space: jump — not blocked by isMoving so you can jump mid-move
+      if (event.key === ' ') {
+        event.preventDefault();
+        doJump();
+        return;
+      }
+
+      // Movement keys are blocked while a tile move is in progress
+      if (isMoving.current) return;
 
       let newPos = { ...characterRef.current.position };
       let targetRotation = 0;
@@ -143,15 +236,8 @@ export default function Model(props) {
     };
 
     window.addEventListener('keydown', onKeyDown);
-
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-    };
+    return () => window.removeEventListener('keydown', onKeyDown);
   });
-
-
-
-
 
 
   return (
@@ -241,9 +327,6 @@ export default function Model(props) {
 
           {/* car */}
           <mesh
-            class
-            onClick={(e) => console.log('click')}
-
             castShadow
             receiveShadow
             geometry={nodes.Plane017_8.geometry}
@@ -312,4 +395,3 @@ export default function Model(props) {
 }
 
 useGLTF.preload('/models/3jsWorld.glb')
-
